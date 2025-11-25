@@ -1,0 +1,8 @@
+streamlit
+easyocr
+pandas
+opencv-python-headless
+gspread
+oauth2client
+Pillow
+numpy
