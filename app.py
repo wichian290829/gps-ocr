@@ -39,7 +39,7 @@ def load_reader():
 reader = load_reader()
 
 def extract_address_components(text):
-    """ฟังก์ชันสำหรับแยกส่วนประกอบที่อยู่จากข้อความดิบ (V6: เน้นความเรียบง่ายและลำดับการดึง)"""
+    """ฟังก์ชันสำหรับแยกส่วนประกอบที่อยู่จากข้อความดิบ (V7: Ultimate Robustness)"""
     # ทำความสะอาดข้อความเบื้องต้น
     text = text.replace("\n", " ").replace("  ", " ").strip()
     data = {
@@ -60,21 +60,19 @@ def extract_address_components(text):
         working_text = working_text.replace(zip_match.group(0), ' ').strip()
         
     # 2. หา จังหวัด 
-    prov_match = re.search(r'(จ\.|จังหวัด)\s*' + name_pattern, working_text)
+    # ใช้ Lookahead สั้นๆ แค่ป้องกันไม่ให้กินคำจนจบประโยค
+    prov_match = re.search(r'(จ\.|จังหวัด)\s*' + name_pattern + r'(?=\s*(อ\.|เขต|ต\.|แขวง|$))', working_text)
     if prov_match: 
-        # ใช้ชื่อจังหวัดที่ดึงได้
         data['province'] = prov_match.group(2).strip()
-        # ลบส่วนจังหวัดออกเพื่อไม่ให้รบกวนการดึงส่วนอื่น
         working_text = working_text.replace(prov_match.group(0), ' ').strip()
         
     # 3. หา อำเภอ/เขต
-    amp_match = re.search(r'(อ\.|อำเภอ|เขต)\s*' + name_pattern, working_text)
+    amp_match = re.search(r'(อ\.|อำเภอ|เขต)\s*' + name_pattern + r'(?=\s*(ต\.|แขวง|จ\.|จังหวัด|$))', working_text)
     if amp_match: 
         data['amphoe'] = amp_match.group(2).strip()
         working_text = working_text.replace(amp_match.group(0), ' ').strip()
 
     # 4. หา ตำบล/แขวง 
-    # ใช้ Lookahead ธรรมดาเพื่อตัดชื่อที่ไม่ใช่ตำบลออก
     tam_match = re.search(r'(ต\.|ตำบล|แขวง)\s*' + name_pattern + r'(?=\s*(อ\.|เขต|จ\.|จังหวัด|$))', working_text)
     if tam_match: 
         data['tambon'] = tam_match.group(2).strip()
@@ -87,14 +85,14 @@ def extract_address_components(text):
         working_text = working_text.replace(moo_match.group(0), ' ').strip()
         
     # 6. หา ถนน/ซอย (ใช้ข้อความที่เหลืออยู่)
-    road_match = re.search(r'(ถ\.|ถนน|ซ\.|ซอย)\s*' + name_pattern, working_text)
+    # ตัดเมื่อเจอคำนำหน้า ต. หรือ ม. หรือจบประโยค
+    road_match = re.search(r'(ถ\.|ถนน|ซ\.|ซอย)\s*' + name_pattern + r'(?=\s*(ต\.|ตำบล|แขวง|ม\.|หมู่|$))', working_text)
     if road_match:
         data['road'] = road_match.group(2).strip()
-        # ลบถนนออกเพื่อทำให้บ้านเลขที่ที่เหลือโดดเด่นขึ้น
         working_text = working_text.replace(road_match.group(0), ' ').strip()
         
-    # 7. หา บ้านเลขที่ (Logic ที่แข็งแกร่งกว่า)
-    # Logic 1: หาตัวเลขที่มีเครื่องหมาย / หรือตัวเลขที่อยู่หน้า ม. หรือ ถ. หรือ ซ. (ใช้ text เดิม)
+    # 7. หา บ้านเลขที่ (Logic ที่แข็งแกร่งที่สุด)
+    # Logic 1: หาตัวเลขที่มีเครื่องหมาย / หรือตัวเลขที่อยู่หน้า ม. หรือ ถ. หรือ ซ. 
     house_match = re.search(r'(\d+/\d+|\d+)(?=\s*(ม\.|ถ\.|ซ\.))', text)
     if house_match: 
         data['house_no'] = house_match.group(1).strip()
@@ -104,9 +102,11 @@ def extract_address_components(text):
         if house_match_slash:
             data['house_no'] = house_match_slash.group(1).strip()
         else:
-             # Logic 3: Fallback สำหรับตัวเลขที่ขึ้นต้นประโยค (เช่น 48, 153) และไม่เกิน 4 หลัก
+             # Logic 3: Fallback สำหรับตัวเลขที่ขึ้นต้นประโยค (เช่น 48, 153)
+             # ต้องใช้ working_text ที่ถูกล้างส่วนที่อยู่ไปแล้วเท่านั้น
             house_match_start = re.match(r'^\s*(\d+)', working_text)
-            if house_match_start and len(house_match_start.group(1)) <= 4:
+            # จำกัดความยาวให้เป็นบ้านเลขที่ (ไม่เกิน 4 หลัก) และต้องไม่มีเลขทศนิยมตามมา (กันพิกัด)
+            if house_match_start and len(house_match_start.group(1)) <= 4 and re.search(r'\d+\.\d{3,}', working_text) is None:
                  data['house_no'] = house_match_start.group(1).strip()
            
     return data
