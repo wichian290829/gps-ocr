@@ -15,16 +15,14 @@ st.title("📍 ระบบอ่านพิกัดและแยกที�
 # --- 2. ฟังก์ชันเชื่อมต่อ Google Sheets ---
 def connect_to_gsheet():
     try:
-        # ตรวจสอบว่ามีการตั้งค่า Secrets แล้วหรือไม่
         if "gcp_service_account" in st.secrets:
             scope = ['https://spreadsheets.google.com/feeds', 'https://www.googleapis.com/auth/drive']
             creds_dict = st.secrets["gcp_service_account"]
             creds = ServiceAccountCredentials.from_json_keyfile_dict(creds_dict, scope)
             client = gspread.authorize(creds)
-            # ต้องสร้าง Sheet ชื่อ 'GPS_Database' รอไว้
             sheet = client.open("GPS_Database").sheet1
             return sheet
-        st.warning("⚠️ ไม่พบ Secrets 'gcp_service_account' ระบบจะทำงานในโหมดออฟไลน์ (ไม่บันทึก)", icon="⚠️")
+        st.warning("⚠️ ไม่พบ Secrets 'gcp_service_account' ระบบจะทำงานในโหมดออฟไลน์ (ไม่บันทึก)")
         return None
     except Exception as e:
         st.error(f"การเชื่อมต่อ Google Sheet ล้มเหลว: {e}")
@@ -33,37 +31,39 @@ def connect_to_gsheet():
 # --- 3. ฟังก์ชัน OCR และ Parser ---
 @st.cache_resource
 def load_reader():
-    # ใช้ 'en' เพื่อความเสถียรในการอ่านตัวเลข/พิกัด
     return easyocr.Reader(['en'], gpu=False)
 
 reader = load_reader()
 
 def extract_address_components(text):
-    """ฟังก์ชันสำหรับแยกส่วนประกอบที่อยู่จากข้อความดิบ (แก้ไขการจับคู่ติดกัน)"""
+    """ฟังก์ชันสำหรับแยกส่วนประกอบที่อยู่จากข้อความดิบ (ปรับปรุง Regex ให้รองรับอักขระพิเศษในชื่อ)"""
     text = text.replace("\n", " ").replace("  ", " ")
     data = {
         "house_no": "", "moo": "", "road": "", 
         "tambon": "", "amphoe": "", "province": "", "zipcode": ""
     }
     
+    # Regex Pattern สำหรับชื่อ: อนุญาตให้มี ไทย, ช่องว่าง, ตัวเลข, จุด, เครื่องหมายทับ
+    name_pattern = r'([ก-๙\s\d\.\/]+?)'
+
     # 1. หา จังหวัด
-    prov_match = re.search(r'(จ\.|จังหวัด)\s*([ก-๙]+)', text)
+    prov_match = re.search(r'(จ\.|จังหวัด)\s*' + name_pattern, text)
     if prov_match: data['province'] = prov_match.group(2).strip()
 
     # 2. หา อำเภอ
-    amp_match = re.search(r'(อ\.|อำเภอ|เขต)\s*([ก-๙]+)', text)
+    amp_match = re.search(r'(อ\.|อำเภอ|เขต)\s*' + name_pattern, text)
     if amp_match: data['amphoe'] = amp_match.group(2).strip()
 
-    # 3. หา ตำบล
-    tam_match = re.search(r'(ต\.|ตำบล|แขวง)\s*([ก-๙]+)', text)
+    # 3. หา ตำบล (ใช้ Lookahead เพื่อตัดชื่อที่ยาวเกินไปถ้าเจอคำนำหน้า อ. ถัดไป)
+    tam_match = re.search(r'(ต\.|ตำบล|แขวง)\s*([ก-๙\s\d\.\/]+?)(?=\s*(อ\.|อำเภอ|เขต|$))', text)
     if tam_match: data['tambon'] = tam_match.group(2).strip()
     
-    # 4. หา หมู่ (ม.3) -> อนุญาตให้มีช่องว่างหรือไม่ก็ได้
+    # 4. หา หมู่
     moo_match = re.search(r'(ม\.|หมู่)\.?\s*(\d+)', text)
     if moo_match: data['moo'] = moo_match.group(2).strip()
     
-    # 5. หา ถนน
-    road_match = re.search(r'(ถ\.|ถนน)\s*([ก-๙a-zA-Z0-9\s]+?)', text)
+    # 5. หา ถนน/ซอย (รวม ซ. และ ถ. และอนุญาตให้มีอักขระพิเศษ)
+    road_match = re.search(r'(ถ\.|ถนน|ซ\.|ซอย)\s*([ก-๙a-zA-Z0-9\s\.\/]+?)', text)
     if road_match:
         road_name = road_match.group(2).strip()
         for marker in ['ต\.', 'ตำบล', 'แขวง', 'อ\.', 'อำเภอ', 'เขต', 'จ\.', 'จังหวัด', '\d{5}']:
@@ -74,13 +74,13 @@ def extract_address_components(text):
     zip_match = re.search(r'\b\d{5}\b', text)
     if zip_match: data['zipcode'] = zip_match.group(0).strip()
            
-    # 7. หา บ้านเลขที่ (Logic ที่ปรับปรุงให้ทำงานกับ 153 ม.3, 168 ม.4 และ 48/1)
-    # Logic 1: หาตัวเลขที่อยู่หน้าคำนำหน้า ม., ต., หรือ ถ. โดยอนุญาตให้มีช่องว่างหรือไม่ก็ได้
-    house_match = re.search(r'(\d+/\d+|\d+)(?=\s*(ม\.|ต\.|ถ\.))', text)
+    # 7. หา บ้านเลขที่ 
+    # Logic 1: หาตัวเลขที่อยู่หน้าคำนำหน้า ม., ต., ถ. หรือ ซ. 
+    house_match = re.search(r'(\d+/\d+|\d+)(?=\s*(ม\.|ต\.|ถ\.|ซ\.))', text)
     if house_match: 
         data['house_no'] = house_match.group(1).strip()
     else:
-        # Logic 2: Fallback สำหรับบ้านเลขที่ที่มี / (เช่น 48/1)
+        # Logic 2: Fallback สำหรับบ้านเลขที่ที่มี / 
         house_match_slash = re.search(r'(\d+/\d+)', text)
         if house_match_slash:
             data['house_no'] = house_match_slash.group(1).strip()
@@ -105,7 +105,6 @@ if uploaded_files:
                 image = Image.open(uploaded_file)
                 img_np = np.array(image)
                 
-                # ใช้ EasyOCR อ่านข้อความ
                 result = reader.readtext(img_np, detail=0)
                 full_text = " ".join(result)
                 
@@ -124,14 +123,12 @@ if uploaded_files:
                         temp_lat = float(lat_match_ne.group(1))
                         temp_long = float(long_match_ne.group(1))
                         
-                        # Boundary Check (Thailand: Lat ~5-21, Lon ~97-106)
                         if (5.0 <= temp_lat <= 21.0) and (97.0 <= temp_long <= 106.0):
                             lat, long = temp_lat, temp_long
                     except ValueError: pass 
 
                 # --- Logic 2: Fallback Float-based (สำรอง) ---
                 if lat is None or long is None:
-                    # ค้นหาตัวเลขทศนิยมที่มีอย่างน้อย 4 ตำแหน่ง
                     potential_floats = [
                         float(f) for f in re.findall(r"(\d{1,3}\.\d{4,})", clean_text) 
                         if 5.0 <= float(f) <= 180.0
@@ -144,7 +141,6 @@ if uploaded_files:
                         
                         if (5.0 <= temp_lat <= 21.0) and (97.0 <= temp_long <= 106.0):
                             lat, long = temp_lat, temp_long
-                # --- จบ Logic การหาพิกัด ---
 
                 addr_data = extract_address_components(full_text)
             
@@ -169,6 +165,7 @@ if uploaded_files:
                     edited_lat = c1.number_input("Latitude", value=lat, format="%.6f", key=f'lat_{i}')
                     edited_long = c2.number_input("Longitude", value=long, format="%.6f", key=f'lon_{i}')
                     
+                    # ใช้ค่าที่ดึงได้จาก addr_data ในการเติมฟอร์ม
                     edited_house = c1.text_input("บ้านเลขที่", addr_data['house_no'], key=f'hn_{i}')
                     edited_moo = c2.text_input("หมู่", addr_data['moo'], key=f'moo_{i}')
                     edited_road = c3.text_input("ถนน", addr_data['road'], key=f'road_{i}')
