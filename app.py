@@ -31,56 +31,52 @@ def connect_to_gsheet():
 # --- 3. ฟังก์ชัน OCR และ Parser ---
 @st.cache_resource
 def load_reader():
-    # ใช้ 'en' เพื่อความเสถียรในการอ่านตัวเลข/พิกัด
     return easyocr.Reader(['en'], gpu=False)
 
 reader = load_reader()
 
+# --- ฟังก์ชัน extract_address_components ที่ปรับปรุงล่าสุด ---
 def extract_address_components(text):
-    """ฟังก์ชันสำหรับแยกส่วนประกอบที่อยู่จากข้อความดิบ (ปรับปรุง Thai Regex)"""
+    """ฟังก์ชันสำหรับแยกส่วนประกอบที่อยู่จากข้อความดิบ (ปรับปรุง Logic บ้านเลขที่)"""
     text = text.replace("\n", " ").replace("  ", " ")
     data = {
         "house_no": "", "moo": "", "road": "", 
         "tambon": "", "amphoe": "", "province": "", "zipcode": ""
     }
     
-    # 1. หา จังหวัด
+    # 1-5. ดึงส่วนประกอบตามคำนำหน้า (อ., ต., ม., ถ., จ.)
     prov_match = re.search(r'(จ\.|จังหวัด)\s*([ก-๙]+)', text)
-    if prov_match: data['province'] = prov_match.group(2)
+    if prov_match: data['province'] = prov_match.group(2).strip()
 
-    # 2. หา อำเภอ
     amp_match = re.search(r'(อ\.|อำเภอ|เขต)\s*([ก-๙]+)', text)
-    if amp_match: data['amphoe'] = amp_match.group(2)
+    if amp_match: data['amphoe'] = amp_match.group(2).strip()
 
-    # 3. หา ตำบล
     tam_match = re.search(r'(ต\.|ตำบล|แขวง)\s*([ก-๙]+)', text)
-    if tam_match: data['tambon'] = tam_match.group(2)
+    if tam_match: data['tambon'] = tam_match.group(2).strip()
     
-    # 4. หา หมู่
     moo_match = re.search(r'(ม\.|หมู่)\.?\s*(\d+)', text)
-    if moo_match: data['moo'] = moo_match.group(2)
-
-    # 5. หา ถนน (Logic ดึงชื่อถนนต่อจาก ถ.)
+    if moo_match: data['moo'] = moo_match.group(2).strip()
+    
     road_match = re.search(r'(ถ\.|ถนน)\s*([ก-๙a-zA-Z0-9\s]+?)', text)
     if road_match:
         road_name = road_match.group(2).strip()
         for marker in ['ต\.', 'ตำบล', 'แขวง', 'อ\.', 'อำเภอ', 'เขต', 'จ\.', 'จังหวัด', '\d{5}']:
             road_name = re.sub(f'{marker}.*$', '', road_name).strip()
         data['road'] = road_name
-
-    # 6. หา บ้านเลขที่ (ตัวเลขที่อยู่หน้าคำว่า ม. หรือ ต.)
-    house_match = re.search(r'(\d+/\d+|\d+)(?=\s+(ม\.|ต\.|ถ\.))', text)
-    if house_match: 
-        data['house_no'] = house_match.group(1)
-    else:
-        # Fallback: หาตัวเลขชุดแรกๆ
-        first_num = re.search(r'^\s*(\d+)\s', text)
-        if first_num:
-            data['house_no'] = first_num.group(1)
-            
-    # 7. หา รหัสไปรษณีย์
+        
     zip_match = re.search(r'\b\d{5}\b', text)
-    if zip_match: data['zipcode'] = zip_match.group(0)
+    if zip_match: data['zipcode'] = zip_match.group(0).strip()
+           
+    # 6. หา บ้านเลขที่ (ปรับปรุงเพื่อให้ได้ 153 หรือ 48/1)
+    # Logic 1: หาตัวเลขที่อยู่หน้าคำนำหน้า ม., ต., หรือ ถ. (แม่นยำที่สุด)
+    house_match = re.search(r'(\d+/\d+|\d+)(?=\s*(ม\.|ต\.|ถ\.))', text)
+    if house_match: 
+        data['house_no'] = house_match.group(1).strip()
+    else:
+        # Logic 2: Fallback สำหรับ 48/1 (กรณีไม่มี ม., ต. ตามหลัง)
+        house_match_slash = re.search(r'(\d+/\d+)', text)
+        if house_match_slash:
+            data['house_no'] = house_match_slash.group(1).strip()
            
     return data
 
@@ -97,7 +93,7 @@ if uploaded_files:
     for i, uploaded_file in enumerate(uploaded_files):
         with st.expander(f"🖼️ ไฟล์: {uploaded_file.name}", expanded=True):
             
-            # 1. ประมวลผล OCR
+            # 1. ประมวลผล OCR และพิกัด
             with st.spinner(f'กำลังแกะรอยพิกัดจาก {uploaded_file.name}...'):
                 image = Image.open(uploaded_file)
                 img_np = np.array(image)
@@ -111,7 +107,7 @@ if uploaded_files:
                 
                 lat, long = None, None
                 
-                # --- แก้ไข Logic การหาพิกัด: Logic 1 (N/E-based) ---
+                # --- Logic 1: N/E-based (หลัก) ---
                 lat_match_ne = re.search(r"(\d+\.\d{4,}).*?n", clean_text)
                 long_match_ne = re.search(r"(\d+\.\d{4,}).*?e", clean_text)
 
@@ -120,27 +116,22 @@ if uploaded_files:
                         temp_lat = float(lat_match_ne.group(1))
                         temp_long = float(long_match_ne.group(1))
                         
-                        # Boundary Check (Thailand: Lat ~5-21, Lon ~97-106)
                         if (5.0 <= temp_lat <= 21.0) and (97.0 <= temp_long <= 106.0):
                             lat, long = temp_lat, temp_long
-                    except ValueError:
-                        pass 
+                    except ValueError: pass 
 
-                # --- แก้ไข Logic การหาพิกัด: Logic 2 (Fallback Float-based) ---
+                # --- Logic 2: Fallback Float-based ---
                 if lat is None or long is None:
-                    # ค้นหาตัวเลขทศนิยมที่มีอย่างน้อย 4 ตำแหน่ง
                     potential_floats = [
                         float(f) for f in re.findall(r"(\d{1,3}\.\d{4,})", clean_text) 
-                        if 5.0 <= float(f) <= 180.0 # กรองค่าที่ไม่น่าใช่พิกัดทิ้งไปก่อน
+                        if 5.0 <= float(f) <= 180.0
                     ]
                     
                     if len(potential_floats) >= 2:
-                        potential_floats.sort() # Latitude มักจะน้อยกว่า Longitude
-                        
+                        potential_floats.sort()
                         temp_lat = potential_floats[0]
                         temp_long = potential_floats[1]
                         
-                        # Re-check Boundary (Latitude และ Longitude ของประเทศไทย)
                         if (5.0 <= temp_lat <= 21.0) and (97.0 <= temp_long <= 106.0):
                             lat, long = temp_lat, temp_long
                 # --- จบการแก้ไข Logic การหาพิกัด ---
@@ -216,7 +207,6 @@ if sheet:
             if df.empty:
                 st.info("ยังไม่มีข้อมูลในฐานข้อมูล")
             else:
-                # เตรียมข้อมูลสำหรับ Filter
                 for col in ['บ้านเลขที่', 'ตำบล', 'อำเภอ', 'หมู่']:
                     if col in df.columns: df[col] = df[col].astype(str).fillna('')
                 
