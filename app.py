@@ -39,7 +39,7 @@ def load_reader():
 reader = load_reader()
 
 def extract_address_components(text):
-    """ฟังก์ชันสำหรับแยกส่วนประกอบที่อยู่จากข้อความดิบ (ลดความซับซ้อนของ Regex และปรับปรุงการดึง)"""
+    """ฟังก์ชันสำหรับแยกส่วนประกอบที่อยู่จากข้อความดิบ (ปรับปรุง Logic การตัดคำให้แข็งแกร่งขึ้น)"""
     text = text.replace("\n", " ").replace("  ", " ")
     data = {
         "house_no": "", "moo": "", "road": "", 
@@ -51,41 +51,39 @@ def extract_address_components(text):
     if zip_match: data['zipcode'] = zip_match.group(0).strip()
 
     # Regex Pattern สำหรับชื่อ: อนุญาตให้มี ไทย, ช่องว่าง, ตัวเลข, จุด, เครื่องหมายทับ (Non-greedy)
+    # [ก-๙] ครอบคลุมตัวอักษรไทยทั้งหมด
     name_pattern = r'([ก-๙\s\d\.\/]+?)'
+    
+    # Marker ที่ใช้ระบุตำแหน่งจบของชื่อ (เช่น ถ้ากำลังหาตำบล ต้องจบเมื่อเจอ อ. หรือ จ.)
+    # Note: Regex นี้ต้องใช้อย่างระมัดระวัง เพราะ Non-greedy อาจหยุดเร็วกว่าที่ควร
 
     # 2. หา จังหวัด
-    prov_match = re.search(r'(จ\.|จังหวัด)\s*' + name_pattern, text)
-    if prov_match: 
-        # ตัดชื่อจังหวัดเมื่อเจอคำอื่นที่ไม่เกี่ยวข้อง เช่น บ้านเลขที่
-        prov_name = prov_match.group(2).strip()
-        prov_name = re.sub(r'(\d+/\d+|\d+)\s*.*$', '', prov_name).strip() 
-        data['province'] = prov_name
+    # พยายามจับจนกว่าจะเจอคำนำหน้าของส่วนประกอบถัดไป หรือจบข้อความ
+    # (อ. | เขต | ต. | แขวง | รหัสไปรษณีย์ | จบข้อความ)
+    prov_match = re.search(r'(จ\.|จังหวัด)\s*' + name_pattern + r'(?=\s*(อ\.|เขต|ต\.|แขวง|\d{5}|$))', text)
+    if prov_match: data['province'] = prov_match.group(2).strip()
 
     # 3. หา อำเภอ/เขต
-    amp_match = re.search(r'(อ\.|อำเภอ|เขต)\s*' + name_pattern, text)
-    if amp_match: 
-        amp_name = amp_match.group(2).strip()
-        amp_name = re.sub(r'(\d+/\d+|\d+)\s*.*$', '', amp_name).strip() 
-        data['amphoe'] = amp_name
+    # (ต. | แขวง | จ. | จังหวัด | รหัสไปรษณีย์ | จบข้อความ)
+    amp_match = re.search(r'(อ\.|อำเภอ|เขต)\s*' + name_pattern + r'(?=\s*(ต\.|แขวง|จ\.|จังหวัด|\d{5}|$))', text)
+    if amp_match: data['amphoe'] = amp_match.group(2).strip()
 
-    # 4. หา ตำบล/แขวง (ใช้ Lookahead เพื่อตัดชื่อที่ยาวเกินไปถ้าเจอคำนำหน้า อ. หรือ จ. ถัดไป)
-    tam_match = re.search(r'(ต\.|ตำบล|แขวง)\s*([ก-๙\s\d\.\/]+?)(?=\s*(อ\.|อำเภอ|เขต|จ\.|จังหวัด|$))', text)
+    # 4. หา ตำบล/แขวง
+    # (อ. | เขต | จ. | จังหวัด | รหัสไปรษณีย์ | จบข้อความ)
+    tam_match = re.search(r'(ต\.|ตำบล|แขวง)\s*' + name_pattern + r'(?=\s*(อ\.|เขต|จ\.|จังหวัด|\d{5}|$))', text)
     if tam_match: data['tambon'] = tam_match.group(2).strip()
     
     # 5. หา หมู่
     moo_match = re.search(r'(ม\.|หมู่)\.?\s*(\d+)', text)
     if moo_match: data['moo'] = moo_match.group(2).strip()
     
-    # 6. หา ถนน/ซอย (รวม ซ. และ ถ. และอนุญาตให้มีอักขระพิเศษ)
-    road_match = re.search(r'(ถ\.|ถนน|ซ\.|ซอย)\s*([ก-๙a-zA-Z0-9\s\.\/]+?)', text)
+    # 6. หา ถนน/ซอย
+    # (ต. | ตำบล | แขวง | จบข้อความ)
+    road_match = re.search(r'(ถ\.|ถนน|ซ\.|ซอย)\s*' + name_pattern + r'(?=\s*(ต\.|ตำบล|แขวง|$))', text)
     if road_match:
-        road_name = road_match.group(2).strip()
-        # ตัดชื่อถนนเมื่อเจอ ต./อ.
-        for marker in ['ต\.', 'ตำบล', 'แขวง', 'อ\.', 'อำเภอ', 'เขต', 'จ\.', 'จังหวัด', '\d{5}']:
-            road_name = re.sub(f'{marker}.*$', '', road_name).strip()
-        data['road'] = road_name
-        
-    # 7. หา บ้านเลขที่ 
+        data['road'] = road_match.group(2).strip()
+
+    # 7. หา บ้านเลขที่ (Logic เดิม ที่ทำงานได้ดี)
     # Logic 1: หาตัวเลขที่อยู่หน้าคำนำหน้า ม., ต., ถ. หรือ ซ. 
     house_match = re.search(r'(\d+/\d+|\d+)(?=\s*(ม\.|ต\.|ถ\.|ซ\.))', text)
     if house_match: 
