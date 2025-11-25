@@ -33,9 +33,7 @@ def connect_to_gsheet():
 # --- 3. ฟังก์ชัน OCR และ Parser ---
 @st.cache_resource
 def load_reader():
-    # *************************************************************
-    # การแก้ไข V9: เพิ่ม 'th' เพื่อให้ OCR อ่านภาษาไทยของที่อยู่ได้ดีขึ้น
-    # *************************************************************
+    # Final V9: ใช้ ['en', 'th'] เพื่อให้อ่านพิกัด (en) และที่อยู่ (th) ได้ดีขึ้น
     return easyocr.Reader(['en', 'th'], gpu=False)
 
 reader = load_reader()
@@ -62,7 +60,6 @@ def extract_address_components(text):
         working_text = working_text.replace(zip_match.group(0), ' ').strip()
         
     # 2. หา จังหวัด 
-    # ใช้ Lookahead สั้นๆ แค่ป้องกันไม่ให้กินคำจนจบประโยค
     prov_match = re.search(r'(จ\.|จังหวัด)\s*' + name_pattern + r'(?=\s*(อ\.|เขต|ต\.|แขวง|$))', working_text)
     if prov_match: 
         data['province'] = prov_match.group(2).strip()
@@ -87,7 +84,6 @@ def extract_address_components(text):
         working_text = working_text.replace(moo_match.group(0), ' ').strip()
         
     # 6. หา ถนน/ซอย (ใช้ข้อความที่เหลืออยู่)
-    # ตัดเมื่อเจอคำนำหน้า ต. หรือ ม. หรือจบประโยค
     road_match = re.search(r'(ถ\.|ถนน|ซ\.|ซอย)\s*' + name_pattern + r'(?=\s*(ต\.|ตำบล|แขวง|ม\.|หมู่|$))', working_text)
     if road_match:
         data['road'] = road_match.group(2).strip()
@@ -99,14 +95,13 @@ def extract_address_components(text):
     if house_match: 
         data['house_no'] = house_match.group(1).strip()
     else:
-        # Logic 2: Fallback สำหรับบ้านเลขที่ที่มี / (แยกจากกัน 3/540)
+        # Logic 2: Fallback สำหรับบ้านเลขที่ที่มี / 
         house_match_slash = re.search(r'(\d+/\d+)', working_text)
         if house_match_slash:
             data['house_no'] = house_match_slash.group(1).strip()
         else:
-             # Logic 3: Fallback สำหรับตัวเลขที่ขึ้นต้นประโยค (เช่น 48, 153)
+             # Logic 3: Fallback สำหรับตัวเลขที่ขึ้นต้นประโยค
             house_match_start = re.match(r'^\s*(\d+)', working_text)
-            # จำกัดความยาวให้เป็นบ้านเลขที่ (ไม่เกิน 4 หลัก) และต้องไม่มีเลขทศนิยมตามมา (กันพิกัด)
             if house_match_start and len(house_match_start.group(1)) <= 4 and re.search(r'\d+\.\d{3,}', working_text) is None:
                  data['house_no'] = house_match_start.group(1).strip()
            
