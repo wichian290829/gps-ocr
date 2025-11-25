@@ -13,7 +13,7 @@ st.set_page_config(page_title="GPS OCR Pro", page_icon="📍", layout="wide")
 st.title("📍 ระบบอ่านพิกัดและแยกที่อยู่ลง Cloud (Pro)")
 
 # --- 2. ฟังก์ชันเชื่อมต่อ Google Sheets ---
-# (ใช้ฟังก์ชันเดิม, ตรวจสอบ Secrets)
+# ต้องตั้งค่า Secrets ใน Streamlit Cloud ก่อนใช้งาน
 def connect_to_gsheet():
     try:
         if "gcp_service_account" in st.secrets:
@@ -21,7 +21,7 @@ def connect_to_gsheet():
             creds_dict = st.secrets["gcp_service_account"]
             creds = ServiceAccountCredentials.from_json_keyfile_dict(creds_dict, scope)
             client = gspread.authorize(creds)
-            # ต้องสร้าง Sheet ชื่อนี้รอไว้
+            # ต้องสร้าง Sheet ชื่อ 'GPS_Database' รอไว้
             sheet = client.open("GPS_Database").sheet1
             return sheet
         st.warning("⚠️ ไม่พบ Secrets 'gcp_service_account' ระบบจะทำงานในโหมดออฟไลน์ (ไม่บันทึก)", icon="⚠️")
@@ -33,14 +33,13 @@ def connect_to_gsheet():
 # --- 3. ฟังก์ชัน OCR และ Parser ---
 @st.cache_resource
 def load_reader():
-    return easyocr.Reader(['th', 'en'], gpu=False)
+    # ลดภาษาเหลือ 'en' เพื่อประหยัด RAM ใน Cloud และเพิ่มความเสถียร
+    return easyocr.Reader(['en'], gpu=False)
 
 reader = load_reader()
 
 def extract_address_components(text):
-    """
-    ฟังก์ชันสำหรับแยกส่วนประกอบที่อยู่จากข้อความดิบ
-    """
+    """ฟังก์ชันสำหรับแยกส่วนประกอบที่อยู่จากข้อความดิบ"""
     text = text.replace("\n", " ").replace("  ", " ")
     data = {
         "house_no": "", "moo": "", "road": "", 
@@ -51,29 +50,28 @@ def extract_address_components(text):
     zip_match = re.search(r'\b\d{5}\b', text)
     if zip_match: data['zipcode'] = zip_match.group(0)
 
-    # 2. หา จังหวัด (จ. หรือ จังหวัด)
+    # 2. หา จังหวัด
     prov_match = re.search(r'(จ\.|จังหวัด)\s*([ก-๙]+)', text)
     if prov_match: data['province'] = prov_match.group(2)
 
-    # 3. หา อำเภอ (อ. | อำเภอ | เขต)
+    # 3. หา อำเภอ
     amp_match = re.search(r'(อ\.|อำเภอ|เขต)\s*([ก-๙]+)', text)
     if amp_match: data['amphoe'] = amp_match.group(2)
 
-    # 4. หา ตำบล (ต. | ตำบล | แขวง)
+    # 4. หา ตำบล
     tam_match = re.search(r'(ต\.|ตำบล|แขวง)\s*([ก-๙]+)', text)
     if tam_match: data['tambon'] = tam_match.group(2)
 
-    # 5. หา ถนน (Fix: ดึงชื่อถนนมาให้ดีขึ้น)
-    # พยายามจับตั้งแต่ ถ. จนถึงคำนำหน้าส่วนอื่น
+    # 5. หา ถนน (ปรับปรุงให้จับชื่อถนนได้ดีขึ้น)
     road_match = re.search(r'(ถ\.|ถนน)\s*([ก-๙a-zA-Z0-9\s]+?)', text)
     if road_match:
         road_name = road_match.group(2).strip()
-        # ตัดคำนำหน้าตัวต่อไปที่อาจจะติดมาออก (เช่น 'สุขุมวิท ต.บาง')
+        # ตัดคำนำหน้าตัวต่อไปที่อาจจะติดมาออก
         for marker in ['ต\.', 'ตำบล', 'แขวง', 'อ\.', 'อำเภอ', 'เขต', 'จ\.', 'จังหวัด', '\d{5}']:
             road_name = re.sub(f'{marker}.*$', '', road_name).strip()
         data['road'] = road_name
 
-    # 6. หา หมู่ (ม. | หมู่)
+    # 6. หา หมู่
     moo_match = re.search(r'(ม\.|หมู่)\.?\s*(\d+)', text)
     if moo_match: data['moo'] = moo_match.group(2)
 
@@ -94,19 +92,17 @@ if uploaded_files:
     st.subheader("📋 ผลการประมวลผลและแก้ไขข้อมูล")
     
     for i, uploaded_file in enumerate(uploaded_files):
-        # ใช้ Expander แยกแต่ละภาพ
         with st.expander(f"🖼️ ไฟล์: {uploaded_file.name}", expanded=True):
             
-            # 1. ประมวลผล OCR
+            # 1. ประมวลผล OCR และพิกัด
             with st.spinner(f'กำลังแกะรอยพิกัดจาก {uploaded_file.name}...'):
                 image = Image.open(uploaded_file)
                 img_np = np.array(image)
+                
                 result = reader.readtext(img_np, detail=0)
                 full_text = " ".join(result)
+                clean_text = full_text.replace("`", "°").replace("'", "°").replace(",", " ").lower()
                 
-                clean_text = full_text.replace("`", "°").replace("'", "°").replace("n,", "N,").replace("e", "E").lower()
-                
-                # Regex หาพิกัด (Lat/Lon)
                 potential_floats = re.findall(r"(\d{1,3}\.\d+)", clean_text)
                 lat, long = None, None
                 
@@ -120,7 +116,6 @@ if uploaded_files:
                 if (lat is None or long is None) and len(potential_floats) >= 2:
                     lat, long = float(potential_floats[0]), float(potential_floats[1])
 
-                # แยกส่วนที่อยู่
                 addr_data = extract_address_components(full_text)
             
             # 2. แสดงภาพและแผนที่
@@ -131,7 +126,7 @@ if uploaded_files:
             if lat and long:
                 map_data = pd.DataFrame({'lat': [lat], 'lon': [long]})
                 with col_map:
-                    st.map(map_data, zoom=15) # แสดงแผนที่ทันที
+                    st.map(map_data, zoom=15)
                 
                 # 3. ส่วนแก้ไขข้อมูล (ใช้ st.form)
                 with st.form(key=f'form_{i}'):
@@ -140,11 +135,9 @@ if uploaded_files:
                     
                     c1, c2, c3, c4, c5 = st.columns(5)
                     
-                    # ข้อมูลพิกัด (สำคัญมาก)
                     edited_lat = c1.number_input("Latitude", value=lat, format="%.6f", key=f'lat_{i}')
                     edited_long = c2.number_input("Longitude", value=long, format="%.6f", key=f'lon_{i}')
                     
-                    # ข้อมูลที่อยู่
                     edited_house = c1.text_input("บ้านเลขที่", addr_data['house_no'], key=f'hn_{i}')
                     edited_moo = c2.text_input("หมู่", addr_data['moo'], key=f'moo_{i}')
                     edited_road = c3.text_input("ถนน", addr_data['road'], key=f'road_{i}')
@@ -153,7 +146,6 @@ if uploaded_files:
                     edited_province = c4.text_input("จังหวัด", addr_data['province'], key=f'province_{i}')
                     edited_zip = c5.text_input("รหัสไปรษณีย์", addr_data['zipcode'], key=f'zip_{i}')
 
-                    # ปุ่มบันทึก
                     save_button = st.form_submit_button(label='💾 ยืนยันและบันทึกลง Database', type="primary")
 
                     if save_button:
@@ -177,35 +169,33 @@ if uploaded_files:
                 st.error("❌ ไม่พบพิกัด GPS ที่ชัดเจนในภาพนี้")
             st.markdown("---")
 
-## 🔎 ระบบค้นหาข้อมูลประวัติ (Live Search & Cascading Filter)
+# --- 5. ส่วนค้นหาข้อมูลประวัติ (Live Search & Cascading Filter) ---
+
+st.divider()
+st.subheader("📊 ฐานข้อมูลที่บันทึกไว้ และระบบค้นหา")
 
 sheet = connect_to_gsheet()
 if sheet:
-    st.subheader("📊 ฐานข้อมูลที่บันทึกไว้")
     if st.checkbox("แสดงและกรองข้อมูลทั้งหมด"):
         try:
-            # ดึงข้อมูลทั้งหมด
             data = sheet.get_all_records()
             df = pd.DataFrame(data)
 
-            # ตรวจสอบความพร้อมของข้อมูล
             if df.empty:
                 st.info("ยังไม่มีข้อมูลในฐานข้อมูล")
             else:
-                # แปลงคอลัมน์สำคัญเป็น String เพื่อใช้ใน Filter
+                # เตรียมข้อมูลสำหรับ Filter
                 for col in ['บ้านเลขที่', 'ตำบล', 'อำเภอ', 'หมู่']:
-                    if col in df.columns:
-                        df[col] = df[col].astype(str)
+                    if col in df.columns: df[col] = df[col].astype(str).fillna('')
                 
                 df_filtered = df.copy()
 
-                # --- 1. Live Search (บ้านเลขที่) ---
-                search_term = st.text_input("🔍 ค้นหาบ้านเลขที่ (Live Search)", "")
+                # 1. Live Search (บ้านเลขที่)
+                search_term = st.text_input("🔍 ค้นหาบ้านเลขที่", "")
                 if search_term:
                     df_filtered = df_filtered[df_filtered['บ้านเลขที่'].str.contains(search_term, case=False, na=False)]
 
-                # --- 2. Cascading Filter (อำเภอ > ตำบล > หมู่) ---
-                
+                # 2. Cascading Filter
                 col_a, col_t, col_m = st.columns(3)
 
                 # A. กรองอำเภอ
@@ -215,23 +205,22 @@ if sheet:
                 if selected_amphoe != 'ทั้งหมด':
                     df_filtered = df_filtered[df_filtered['อำเภอ'] == selected_amphoe]
 
-                # B. กรองตำบล (อ้างอิงจากข้อมูลที่ถูกกรองด้วยอำเภอ)
+                # B. กรองตำบล
                 unique_tambon = ['ทั้งหมด'] + sorted(df_filtered['ตำบล'].unique().tolist())
                 selected_tambon = col_t.selectbox("เลือกตำบล/แขวง", unique_tambon)
                 
                 if selected_tambon != 'ทั้งหมด':
                     df_filtered = df_filtered[df_filtered['ตำบล'] == selected_tambon]
 
-                # C. กรองหมู่ (อ้างอิงจากข้อมูลที่ถูกกรองด้วยตำบล)
+                # C. กรองหมู่
                 unique_moo = ['ทั้งหมด'] + sorted(df_filtered['หมู่'].unique().tolist())
                 selected_moo = col_m.selectbox("เลือกหมู่บ้าน", unique_moo)
                 
                 if selected_moo != 'ทั้งหมด':
                     df_filtered = df_filtered[df_filtered['หมู่'] == selected_moo]
 
-                # --- 3. แสดงผลลัพธ์ ---
+                # 3. แสดงผลลัพธ์
                 st.dataframe(df_filtered, use_container_width=True)
 
         except Exception as e:
             st.error(f"เกิดข้อผิดพลาดในการดึงข้อมูลหรือกรองข้อมูล: {e}")
-
