@@ -20,7 +20,6 @@ def connect_to_gsheet():
             creds_dict = st.secrets["gcp_service_account"]
             creds = ServiceAccountCredentials.from_json_keyfile_dict(creds_dict, scope)
             client = gspread.authorize(creds)
-            # ต้องสร้าง Sheet ชื่อ 'GPS_Database' รอไว้
             sheet = client.open("GPS_Database").sheet1
             return sheet
         st.warning("⚠️ ไม่พบ Secrets 'gcp_service_account' ระบบจะทำงานในโหมดออฟไลน์ (ไม่บันทึก)", icon="⚠️")
@@ -32,7 +31,7 @@ def connect_to_gsheet():
 # --- 3. ฟังก์ชัน OCR และ Parser ---
 @st.cache_resource
 def load_reader():
-    # ใช้ 'en' เป็นหลักเพื่อให้การอ่านตัวเลขและพิกัดเสถียรขึ้น
+    # ใช้ 'en' เพื่อความเสถียรในการอ่านตัวเลข/พิกัด
     return easyocr.Reader(['en'], gpu=False)
 
 reader = load_reader()
@@ -54,31 +53,27 @@ def extract_address_components(text):
     if amp_match: data['amphoe'] = amp_match.group(2)
 
     # 3. หา ตำบล
-    # จับ ต. ตามด้วยชื่อภาษาไทย
     tam_match = re.search(r'(ต\.|ตำบล|แขวง)\s*([ก-๙]+)', text)
     if tam_match: data['tambon'] = tam_match.group(2)
     
     # 4. หา หมู่
-    # จับ ม. ตามด้วยตัวเลขเท่านั้น
     moo_match = re.search(r'(ม\.|หมู่)\.?\s*(\d+)', text)
     if moo_match: data['moo'] = moo_match.group(2)
 
-    # 5. หา ถนน
+    # 5. หา ถนน (Logic ดึงชื่อถนนต่อจาก ถ.)
     road_match = re.search(r'(ถ\.|ถนน)\s*([ก-๙a-zA-Z0-9\s]+?)', text)
     if road_match:
         road_name = road_match.group(2).strip()
-        # ตัดคำนำหน้าตัวต่อไปที่อาจจะติดมาออก
         for marker in ['ต\.', 'ตำบล', 'แขวง', 'อ\.', 'อำเภอ', 'เขต', 'จ\.', 'จังหวัด', '\d{5}']:
             road_name = re.sub(f'{marker}.*$', '', road_name).strip()
         data['road'] = road_name
 
-    # 6. หา บ้านเลขที่ (ตัวเลขที่อยู่หน้าคำว่า ม. หรือ ต. หรือตัวเลขชุดแรก)
-    # 168 ม.4 ต.โรงช้าง
+    # 6. หา บ้านเลขที่ (ตัวเลขที่อยู่หน้าคำว่า ม. หรือ ต.)
     house_match = re.search(r'(\d+/\d+|\d+)(?=\s+(ม\.|ต\.|ถ\.))', text)
     if house_match: 
         data['house_no'] = house_match.group(1)
     else:
-        # Fallback: หาตัวเลขชุดแรกที่อยู่หน้า ม. หรือ ต.
+        # Fallback: หาตัวเลขชุดแรกๆ
         first_num = re.search(r'^\s*(\d+)\s', text)
         if first_num:
             data['house_no'] = first_num.group(1)
@@ -102,7 +97,7 @@ if uploaded_files:
     for i, uploaded_file in enumerate(uploaded_files):
         with st.expander(f"🖼️ ไฟล์: {uploaded_file.name}", expanded=True):
             
-            # 1. ประมวลผล OCR และพิกัด
+            # 1. ประมวลผล OCR
             with st.spinner(f'กำลังแกะรอยพิกัดจาก {uploaded_file.name}...'):
                 image = Image.open(uploaded_file)
                 img_np = np.array(image)
@@ -116,26 +111,38 @@ if uploaded_files:
                 
                 lat, long = None, None
                 
-                # --- แก้ไข Logic การหาพิกัดโดยใช้ N และ E ---
-                # ค้นหาตัวเลขทศนิยมที่ตามด้วย n (North)
-                lat_match = re.search(r"(\d+\.\d+).*?n", clean_text)
-                if lat_match:
-                    try:
-                        lat = float(lat_match.group(1))
-                        # กรองค่า Lat สำหรับไทย (5.0 ถึง 21.0)
-                        if not (5.0 <= lat <= 21.0): lat = None
-                    except ValueError:
-                        lat = None
+                # --- แก้ไข Logic การหาพิกัด: Logic 1 (N/E-based) ---
+                lat_match_ne = re.search(r"(\d+\.\d{4,}).*?n", clean_text)
+                long_match_ne = re.search(r"(\d+\.\d{4,}).*?e", clean_text)
 
-                # ค้นหาตัวเลขทศนิยมที่ตามด้วย e (East)
-                long_match = re.search(r"(\d+\.\d+).*?e", clean_text)
-                if long_match:
+                if lat_match_ne and long_match_ne:
                     try:
-                        long = float(long_match.group(1))
-                         # กรองค่า Lon สำหรับไทย (97.0 ถึง 106.0)
-                        if not (97.0 <= long <= 106.0): long = None
+                        temp_lat = float(lat_match_ne.group(1))
+                        temp_long = float(long_match_ne.group(1))
+                        
+                        # Boundary Check (Thailand: Lat ~5-21, Lon ~97-106)
+                        if (5.0 <= temp_lat <= 21.0) and (97.0 <= temp_long <= 106.0):
+                            lat, long = temp_lat, temp_long
                     except ValueError:
-                        long = None
+                        pass 
+
+                # --- แก้ไข Logic การหาพิกัด: Logic 2 (Fallback Float-based) ---
+                if lat is None or long is None:
+                    # ค้นหาตัวเลขทศนิยมที่มีอย่างน้อย 4 ตำแหน่ง
+                    potential_floats = [
+                        float(f) for f in re.findall(r"(\d{1,3}\.\d{4,})", clean_text) 
+                        if 5.0 <= float(f) <= 180.0 # กรองค่าที่ไม่น่าใช่พิกัดทิ้งไปก่อน
+                    ]
+                    
+                    if len(potential_floats) >= 2:
+                        potential_floats.sort() # Latitude มักจะน้อยกว่า Longitude
+                        
+                        temp_lat = potential_floats[0]
+                        temp_long = potential_floats[1]
+                        
+                        # Re-check Boundary (Latitude และ Longitude ของประเทศไทย)
+                        if (5.0 <= temp_lat <= 21.0) and (97.0 <= temp_long <= 106.0):
+                            lat, long = temp_lat, temp_long
                 # --- จบการแก้ไข Logic การหาพิกัด ---
 
                 addr_data = extract_address_components(full_text)
@@ -146,6 +153,7 @@ if uploaded_files:
                 st.image(image, caption='ภาพต้นฉบับ', use_container_width=True)
             
             if lat and long:
+                st.success("✅ อ่านพิกัดสำเร็จ")
                 map_data = pd.DataFrame({'lat': [lat], 'lon': [long]})
                 with col_map:
                     st.map(map_data, zoom=15)
