@@ -13,7 +13,6 @@ st.set_page_config(page_title="GPS OCR Pro", page_icon="📍", layout="wide")
 st.title("📍 ระบบอ่านพิกัดและแยกที่อยู่ลง Cloud (Pro)")
 
 # --- 2. ฟังก์ชันเชื่อมต่อ Google Sheets ---
-# ต้องตั้งค่า Secrets ใน Streamlit Cloud ก่อนใช้งาน
 def connect_to_gsheet():
     try:
         if "gcp_service_account" in st.secrets:
@@ -33,36 +32,38 @@ def connect_to_gsheet():
 # --- 3. ฟังก์ชัน OCR และ Parser ---
 @st.cache_resource
 def load_reader():
-    # ลดภาษาเหลือ 'en' เพื่อประหยัด RAM ใน Cloud และเพิ่มความเสถียร
+    # ใช้ 'en' เป็นหลักเพื่อให้การอ่านตัวเลขและพิกัดเสถียรขึ้น
     return easyocr.Reader(['en'], gpu=False)
 
 reader = load_reader()
 
 def extract_address_components(text):
-    """ฟังก์ชันสำหรับแยกส่วนประกอบที่อยู่จากข้อความดิบ"""
+    """ฟังก์ชันสำหรับแยกส่วนประกอบที่อยู่จากข้อความดิบ (ปรับปรุง Thai Regex)"""
     text = text.replace("\n", " ").replace("  ", " ")
     data = {
         "house_no": "", "moo": "", "road": "", 
         "tambon": "", "amphoe": "", "province": "", "zipcode": ""
     }
     
-    # 1. หา รหัสไปรษณีย์ (5 หลัก)
-    zip_match = re.search(r'\b\d{5}\b', text)
-    if zip_match: data['zipcode'] = zip_match.group(0)
-
-    # 2. หา จังหวัด
+    # 1. หา จังหวัด
     prov_match = re.search(r'(จ\.|จังหวัด)\s*([ก-๙]+)', text)
     if prov_match: data['province'] = prov_match.group(2)
 
-    # 3. หา อำเภอ
+    # 2. หา อำเภอ
     amp_match = re.search(r'(อ\.|อำเภอ|เขต)\s*([ก-๙]+)', text)
     if amp_match: data['amphoe'] = amp_match.group(2)
 
-    # 4. หา ตำบล
+    # 3. หา ตำบล
+    # จับ ต. ตามด้วยชื่อภาษาไทย
     tam_match = re.search(r'(ต\.|ตำบล|แขวง)\s*([ก-๙]+)', text)
     if tam_match: data['tambon'] = tam_match.group(2)
+    
+    # 4. หา หมู่
+    # จับ ม. ตามด้วยตัวเลขเท่านั้น
+    moo_match = re.search(r'(ม\.|หมู่)\.?\s*(\d+)', text)
+    if moo_match: data['moo'] = moo_match.group(2)
 
-    # 5. หา ถนน (ปรับปรุงให้จับชื่อถนนได้ดีขึ้น)
+    # 5. หา ถนน
     road_match = re.search(r'(ถ\.|ถนน)\s*([ก-๙a-zA-Z0-9\s]+?)', text)
     if road_match:
         road_name = road_match.group(2).strip()
@@ -71,13 +72,20 @@ def extract_address_components(text):
             road_name = re.sub(f'{marker}.*$', '', road_name).strip()
         data['road'] = road_name
 
-    # 6. หา หมู่
-    moo_match = re.search(r'(ม\.|หมู่)\.?\s*(\d+)', text)
-    if moo_match: data['moo'] = moo_match.group(2)
-
-    # 7. หา บ้านเลขที่
-    house_match = re.search(r'(\d+/\d+|\d+(?=\s+(ม\.|ถ\.)))', text)
-    if house_match: data['house_no'] = house_match.group(1)
+    # 6. หา บ้านเลขที่ (ตัวเลขที่อยู่หน้าคำว่า ม. หรือ ต. หรือตัวเลขชุดแรก)
+    # 168 ม.4 ต.โรงช้าง
+    house_match = re.search(r'(\d+/\d+|\d+)(?=\s+(ม\.|ต\.|ถ\.))', text)
+    if house_match: 
+        data['house_no'] = house_match.group(1)
+    else:
+        # Fallback: หาตัวเลขชุดแรกที่อยู่หน้า ม. หรือ ต.
+        first_num = re.search(r'^\s*(\d+)\s', text)
+        if first_num:
+            data['house_no'] = first_num.group(1)
+            
+    # 7. หา รหัสไปรษณีย์
+    zip_match = re.search(r'\b\d{5}\b', text)
+    if zip_match: data['zipcode'] = zip_match.group(0)
            
     return data
 
@@ -101,20 +109,34 @@ if uploaded_files:
                 
                 result = reader.readtext(img_np, detail=0)
                 full_text = " ".join(result)
-                clean_text = full_text.replace("`", "°").replace("'", "°").replace(",", " ").lower()
                 
-                potential_floats = re.findall(r"(\d{1,3}\.\d+)", clean_text)
+                # Clean text และทำให้เป็นตัวพิมพ์เล็กทั้งหมด
+                clean_text = full_text.replace("`", "°").replace("'", "°").replace(",", " ").lower()
+                clean_text = re.sub(r'\s+', ' ', clean_text) 
+                
                 lat, long = None, None
                 
-                for num_str in potential_floats:
+                # --- แก้ไข Logic การหาพิกัดโดยใช้ N และ E ---
+                # ค้นหาตัวเลขทศนิยมที่ตามด้วย n (North)
+                lat_match = re.search(r"(\d+\.\d+).*?n", clean_text)
+                if lat_match:
                     try:
-                        val = float(num_str)
-                        if 5.0 <= val <= 21.0 and lat is None: lat = val
-                        elif 97.0 <= val <= 106.0 and long is None: long = val
-                    except: continue
+                        lat = float(lat_match.group(1))
+                        # กรองค่า Lat สำหรับไทย (5.0 ถึง 21.0)
+                        if not (5.0 <= lat <= 21.0): lat = None
+                    except ValueError:
+                        lat = None
 
-                if (lat is None or long is None) and len(potential_floats) >= 2:
-                    lat, long = float(potential_floats[0]), float(potential_floats[1])
+                # ค้นหาตัวเลขทศนิยมที่ตามด้วย e (East)
+                long_match = re.search(r"(\d+\.\d+).*?e", clean_text)
+                if long_match:
+                    try:
+                        long = float(long_match.group(1))
+                         # กรองค่า Lon สำหรับไทย (97.0 ถึง 106.0)
+                        if not (97.0 <= long <= 106.0): long = None
+                    except ValueError:
+                        long = None
+                # --- จบการแก้ไข Logic การหาพิกัด ---
 
                 addr_data = extract_address_components(full_text)
             
@@ -167,6 +189,8 @@ if uploaded_files:
                             st.error("ไม่สามารถบันทึกได้เนื่องจาก Google Sheet ไม่พร้อมใช้งาน")
             else:
                 st.error("❌ ไม่พบพิกัด GPS ที่ชัดเจนในภาพนี้")
+                with st.expander("ข้อความที่อ่านได้ทั้งหมด"):
+                    st.write(full_text)
             st.markdown("---")
 
 # --- 5. ส่วนค้นหาข้อมูลประวัติ (Live Search & Cascading Filter) ---
